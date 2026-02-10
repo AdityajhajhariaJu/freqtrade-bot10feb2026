@@ -20,7 +20,7 @@ CONFIG_PATH = "/opt/freqtrade/user_data/config.binance_futures_live.json"
 PAIRS = ["ETHUSDT", "SOLUSDT", "LTCUSDT", "DOGEUSDT", "AVAXUSDT", "NEARUSDT", "INJUSDT", "LINKUSDT", "BNBUSDT"]
 FETCH_LIMIT = 200
 TIMEFRAME = "1m"
-LOOP_SEC = 60
+LOOP_SEC = 75
 DEFAULT_MAX_AGE = 25 * 60  # 25 minutes
 # Max ages (seconds) per strategy (upper bound minutes)
 MAX_AGE = {
@@ -45,6 +45,22 @@ _LAST_SWAP_TS = 0
 
 
 
+
+
+def log_filtered(sig, reason):
+    from pathlib import Path
+    import csv, time
+    fpath = Path('/opt/multi-strat-engine/reports/filtered_signals.csv')
+    exists = fpath.exists()
+    with fpath.open('a', newline='') as f:
+        w = csv.writer(f)
+        if not exists:
+            w.writerow(["ts","pair","strategy","side","price","reason","outcome","pnl_pct","exit_price","horizon_min"])
+        w.writerow([time.time(), sig.pair, sig.strategy_name, sig.side, sig.entry_price, reason, "", "", "", ""])
+
+
+def normalize_pair(p):
+    return (p or '').replace('/USDT:USDT','').replace('/USDT','').replace('USDT','USDT')
 def log_event(event, pair, side, qty=None, price=None, strategy_id="", strategy_name="", pnl=None, note=""):
     from pathlib import Path
     import csv, time
@@ -54,7 +70,7 @@ def log_event(event, pair, side, qty=None, price=None, strategy_id="", strategy_
         w=csv.writer(f)
         if not exists:
             w.writerow(["ts","event","pair","side","qty","price","strategy_id","strategy_name","pnl","note"])
-        w.writerow([int(time.time()), event, pair, side, qty or "", price or "", strategy_id, strategy_name, pnl or "", note])
+        w.writerow([int(time.time()), event, normalize_pair(pair), side, qty or "", price or "", strategy_id, strategy_name, pnl or "", note])
 
 def load_keys():
     with open(CONFIG_PATH, "r") as f:
@@ -295,7 +311,25 @@ async def loop():
                 for sig in res.signals:
                     await ensure_leverage(exchange, sig.pair, sig.leverage)
                     await place_orders(exchange, sig)
+            for fs in res.filtered:
+                try:
+                    log_filtered(fs, fs._filter_reason)
+                except Exception:
+                    pass
             d = res.diagnostics
+            # log cycle diagnostics with timestamp for charts
+            try:
+                from pathlib import Path
+                import csv
+                fpath = Path('/opt/multi-strat-engine/reports/cycle_diag_log.csv')
+                exists = fpath.exists()
+                with fpath.open('a', newline='') as f:
+                    w = csv.writer(f)
+                    if not exists:
+                        w.writerow(["ts","raw","after_cooldown","after_flood","after_category","final"])
+                    w.writerow([int(time.time()), d.raw_count, d.after_cooldown, d.after_flood, d.after_category, d.final])
+            except Exception:
+                pass
             print(f"Cycle diag: Raw {d.raw_count} -> Cooldown {d.after_cooldown} -> Flood {d.after_flood} -> Cat {d.after_category} -> Final {d.final}")
             elapsed = time.time() - start
             await asyncio.sleep(max(5, LOOP_SEC - elapsed))

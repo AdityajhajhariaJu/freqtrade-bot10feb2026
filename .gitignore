@@ -5,3 +5,8 @@ multi-strat-engine/reports/.restart_state.json
 multi-strat-engine/reports/*.log
 multi-strat-engine/trade_events.csv
 multi-strat-engine/*.log
+__pycache__/
+*.pyc
+user_data/logs/
+user_data/freqtrade-run.log
+user_data/config*.json
