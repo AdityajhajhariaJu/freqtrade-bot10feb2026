@@ -14,14 +14,16 @@ import asyncio
 import json
 import time
 import ccxt.async_support as ccxt
-from strategies import Candle, ActiveTrade, run_signal_scan, CONFIG as STRAT_CONFIG, set_pair_cooldown
+from strategies import Candle, ActiveTrade, run_signal_scan, CONFIG as STRAT_CONFIG, set_pair_cooldown, load_2h_strategies
 
 CONFIG_PATH = "/opt/freqtrade/user_data/config.binance_futures_live.json"
-PAIRS = ["ETHUSDT", "SOLUSDT", "LTCUSDT", "DOGEUSDT", "AVAXUSDT", "NEARUSDT", "INJUSDT", "LINKUSDT", "BNBUSDT"]
+load_2h_strategies()
+PAIRS = STRAT_CONFIG["pairs"]
 FETCH_LIMIT = 200
 TIMEFRAME = "1m"
 LOOP_SEC = 75
 DEFAULT_MAX_AGE = 25 * 60  # 25 minutes
+from new_strategies_2h import NEW_MAX_AGE
 # Max ages (seconds) per strategy (upper bound minutes)
 MAX_AGE = {
     # Trend/Breakout -> 40m
@@ -38,6 +40,8 @@ MAX_AGE = {
     # Structural -> 35m
     "engulfing_sr": 35 * 60,
 }
+# extend with 2h max ages
+MAX_AGE.update(NEW_MAX_AGE)
 
 # In-memory tracker: pair -> {strategy_id, opened_at}
 position_meta = {}

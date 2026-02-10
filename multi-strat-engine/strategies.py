@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 from typing import Optional, Literal
 
 logger = logging.getLogger(__name__)
+VERBOSE_FILTER_LOG = True
 _FUNDING_CTX = {}
 
 
@@ -102,7 +103,7 @@ class ScanResult:
 
 CONFIG = {
     "min_trade_size": 10,
-    "max_concurrent_trades": 4,
+    "max_concurrent_trades": 8,
     "risk_per_trade": 0.02,
     "confidence_threshold": 0.66,
     "confirm_signal": True,
@@ -146,7 +147,7 @@ CONFIG = {
     },
         "pair_filters": {
         "LINKUSDT": ["rsi_snap", "stoch_cross", "obv_divergence"],
-        "BNBUSDT": ["rsi_snap", "vwap_bounce"],
+        "BNBUSDT": ["rsi_snap", "vwap_bounce", "ichimoku_cloud", "keltner_reversion", "donchian_breakout", "supertrend_flip", "adx_di_cross", "fib_pullback", "cmf_divergence", "vp_poc_reversion", "pivot_bounce", "vwap_sd_reversion", "mtf_ema_ribbon", "funding_fade", "bb_kc_squeeze"],
     },
     "strategy_categories": {
         "trend": ["ema_scalp", "triple_ema", "macd_flip", "atr_breakout", "liquidation_cascade"],
@@ -154,10 +155,40 @@ CONFIG = {
         "structural": ["bb_squeeze", "vwap_bounce", "engulfing_sr"],
     },
     "pairs": [
-        "ETHUSDT", "SOLUSDT", "LTCUSDT", "DOGEUSDT", "AVAXUSDT", "NEARUSDT", "INJUSDT", "LINKUSDT", "BNBUSDT",
+        "ETHUSDT", "LTCUSDT", "DOGEUSDT", "AVAXUSDT", "NEARUSDT", "LINKUSDT", "BNBUSDT",
     ],
     "timeframes": ["1m", "5m"],
+    "max_1m_trades": 4,
+    "max_2h_trades": 4,
 }
+
+# Separate config for 2-3h strategies
+CONFIG_2H = {
+    "confidence_threshold": 0.63,
+    "confirm_signal": False,
+    "min_volatility_pct": 0.006,
+    "tp_multiplier": 1.10,
+    "min_tp_percent": 0.005,
+    "min_sl_percent": 0.003,
+    "min_risk_reward": 1.5,
+    "max_funding_long": 0.0005,
+    "max_funding_short": 0.0005,
+    "cooldown_sec": 1800,
+    "post_close_cooldown_sec": 1800,
+    "skip_trend_ema_filter": True,
+    "skip_regime_filter": True,
+    "skip_htf_alignment": True,
+}
+
+STRATEGIES_2H = {
+    "ichimoku_cloud", "keltner_reversion", "donchian_breakout", "supertrend_flip",
+    "adx_di_cross", "fib_pullback", "cmf_divergence", "vp_poc_reversion",
+    "pivot_bounce", "vwap_sd_reversion", "mtf_ema_ribbon", "funding_fade",
+    "bb_kc_squeeze",
+}
+
+def is_2h_strategy(strategy_id: str) -> bool:
+    return strategy_id in STRATEGIES_2H
 
 
 def set_funding_context(funding: dict):
@@ -166,7 +197,7 @@ def set_funding_context(funding: dict):
 
 
 
-def clamp_leverage(lv, cfg):
+def clamp_leverage(lv, CONFIG):
     try:
         return min(int(lv), int(cfg.get("max_leverage", lv)))
     except Exception:
@@ -390,6 +421,12 @@ def volume_spike(candles: list[Candle], lookback: int = 20) -> float:
         return 1.0
     return candles[-1].volume / avg_vol
 
+def candle_body_ratio(c: Candle) -> float:
+    rng = max(1e-9, c.high - c.low)
+    body = abs(c.close - c.open)
+    return body / rng
+
+
 class BaseStrategy:
     id: str = ""
     name: str = ""
@@ -454,12 +491,12 @@ class BBSqueezeStrategy(BaseStrategy):
                 conf = 0.58 + bonus
                 if CONFIG.get('structural_quality', {}).get('enabled', False):
                     conf += structural_quality_boost(candles, 'LONG', CONFIG.get('structural_quality', {}))
-                return Signal(side="LONG", confidence=conf, tp_percent=0.008, sl_percent=0.004, leverage=clamp_leverage(10, cfg), reason=f"BB squeeze breakout UP | BW={bb['bandwidth'] * 100:.2f}% | ATR={atr_pct * 100:.3f}%")
+                return Signal(side="LONG", confidence=conf, tp_percent=0.008, sl_percent=0.004, leverage=clamp_leverage(10, CONFIG), reason=f"BB squeeze breakout UP | BW={bb['bandwidth'] * 100:.2f}% | ATR={atr_pct * 100:.3f}%")
             if price < bb["lower"]:
                 conf = 0.58 + bonus
                 if CONFIG.get('structural_quality', {}).get('enabled', False):
                     conf += structural_quality_boost(candles, 'SHORT', CONFIG.get('structural_quality', {}))
-                return Signal(side="SHORT", confidence=conf, tp_percent=0.008, sl_percent=0.004, leverage=clamp_leverage(10, cfg), reason=f"BB squeeze breakout DOWN | BW={bb['bandwidth'] * 100:.2f}% | ATR={atr_pct * 100:.3f}%")
+                return Signal(side="SHORT", confidence=conf, tp_percent=0.008, sl_percent=0.004, leverage=clamp_leverage(10, CONFIG), reason=f"BB squeeze breakout DOWN | BW={bb['bandwidth'] * 100:.2f}% | ATR={atr_pct * 100:.3f}%")
         return None
 
 class MACDFlipStrategy(BaseStrategy):
@@ -474,12 +511,12 @@ class MACDFlipStrategy(BaseStrategy):
             trend_bonus = 0.06 if price > ema20 else 0
             conf = 0.57 + trend_bonus + min(abs(m["histogram"]) / (price * 0.001), 0.1)
             trend = "UP" if price > ema20 else "DOWN"
-            return Signal(side="LONG", confidence=conf, tp_percent=0.006, sl_percent=0.004, leverage=clamp_leverage(10, cfg), reason=f"MACD histogram flipped bullish | H={m['histogram']:.4f} | Trend={trend}")
+            return Signal(side="LONG", confidence=conf, tp_percent=0.006, sl_percent=0.004, leverage=clamp_leverage(10, CONFIG), reason=f"MACD histogram flipped bullish | H={m['histogram']:.4f} | Trend={trend}")
         if m_prev["histogram"] > 0 and m["histogram"] < -threshold:
             trend_bonus = 0.06 if price < ema20 else 0
             conf = 0.57 + trend_bonus + min(abs(m["histogram"]) / (price * 0.001), 0.1)
             trend = "DOWN" if price < ema20 else "UP"
-            return Signal(side="SHORT", confidence=conf, tp_percent=0.006, sl_percent=0.004, leverage=clamp_leverage(10, cfg), reason=f"MACD histogram flipped bearish | H={m['histogram']:.4f} | Trend={trend}")
+            return Signal(side="SHORT", confidence=conf, tp_percent=0.006, sl_percent=0.004, leverage=clamp_leverage(10, CONFIG), reason=f"MACD histogram flipped bearish | H={m['histogram']:.4f} | Trend={trend}")
         return None
 
 
@@ -508,10 +545,10 @@ class LiquidationCascadeStrategy(BaseStrategy):
         if impulse > 2.0 and vol_ratio > 2.0:
             if last.close < last.open and (last.close - last.low) / max(1e-9, rng) < 0.3:
                 conf = 0.60 + min((impulse - 2.0) * 0.05, 0.10)
-                return Signal(side="SHORT", confidence=conf, tp_percent=0.006, sl_percent=0.004, leverage=clamp_leverage(10, cfg), reason=f"Liquidation cascade proxy DOWN | Impulse={impulse:.2f}x | Vol={vol_ratio:.1f}x")
+                return Signal(side="SHORT", confidence=conf, tp_percent=0.006, sl_percent=0.004, leverage=clamp_leverage(10, CONFIG), reason=f"Liquidation cascade proxy DOWN | Impulse={impulse:.2f}x | Vol={vol_ratio:.1f}x")
             if last.close > last.open and (last.high - last.close) / max(1e-9, rng) < 0.3:
                 conf = 0.60 + min((impulse - 2.0) * 0.05, 0.10)
-                return Signal(side="LONG", confidence=conf, tp_percent=0.006, sl_percent=0.004, leverage=clamp_leverage(10, cfg), reason=f"Liquidation cascade proxy UP | Impulse={impulse:.2f}x | Vol={vol_ratio:.1f}x")
+                return Signal(side="LONG", confidence=conf, tp_percent=0.006, sl_percent=0.004, leverage=clamp_leverage(10, CONFIG), reason=f"Liquidation cascade proxy UP | Impulse={impulse:.2f}x | Vol={vol_ratio:.1f}x")
         return None
 class VWAPBounceStrategy(BaseStrategy):
     id = "vwap_bounce"; name = "VWAP Bounce Scalp"; timeframe = "1m"; leverage = 12; avg_signals_per_hour = 1.0
@@ -540,10 +577,10 @@ class StochCrossStrategy(BaseStrategy):
         closes = [c.close for c in candles]; stoch_now = stochastic(candles, 14); stoch_prev = stochastic(candles[:-1], 14); rsi_val = rsi(closes, 14)
         if stoch_now["k"] < 25 and stoch_prev["k"] < stoch_prev["d"] and stoch_now["k"] > stoch_now["d"] and rsi_val < 40:
             conf = 0.59 + min((25 - stoch_now["k"]) / 100, 0.1)
-            return Signal(side="LONG", confidence=conf, tp_percent=0.006, sl_percent=0.004, leverage=clamp_leverage(10, cfg), reason=f"Stoch bullish cross in OS | K={stoch_now['k']:.1f} D={stoch_now['d']:.1f} | RSI={rsi_val:.1f}")
+            return Signal(side="LONG", confidence=conf, tp_percent=0.006, sl_percent=0.004, leverage=clamp_leverage(10, CONFIG), reason=f"Stoch bullish cross in OS | K={stoch_now['k']:.1f} D={stoch_now['d']:.1f} | RSI={rsi_val:.1f}")
         if stoch_now["k"] > 75 and stoch_prev["k"] > stoch_prev["d"] and stoch_now["k"] < stoch_now["d"] and rsi_val > 60:
             conf = 0.59 + min((stoch_now["k"] - 75) / 100, 0.1)
-            return Signal(side="SHORT", confidence=conf, tp_percent=0.006, sl_percent=0.004, leverage=clamp_leverage(10, cfg), reason=f"Stoch bearish cross in OB | K={stoch_now['k']:.1f} D={stoch_now['d']:.1f} | RSI={rsi_val:.1f}")
+            return Signal(side="SHORT", confidence=conf, tp_percent=0.006, sl_percent=0.004, leverage=clamp_leverage(10, CONFIG), reason=f"Stoch bearish cross in OB | K={stoch_now['k']:.1f} D={stoch_now['d']:.1f} | RSI={rsi_val:.1f}")
         return None
 
 class ATRBreakoutStrategy(BaseStrategy):
@@ -597,9 +634,9 @@ class EngulfingSRStrategy(BaseStrategy):
         near_support = abs(last.low - support) / support < 0.004 if support else False
         near_resistance = abs(last.high - resistance) / resistance < 0.004 if resistance else False
         if bullish and near_support:
-            return Signal(side="LONG", confidence=0.63, tp_percent=0.006, sl_percent=0.003, leverage=clamp_leverage(10, cfg), reason=f"Bullish engulfing at support {support:.2f}")
+            return Signal(side="LONG", confidence=0.63, tp_percent=0.006, sl_percent=0.003, leverage=clamp_leverage(10, CONFIG), reason=f"Bullish engulfing at support {support:.2f}")
         if bearish and near_resistance:
-            return Signal(side="SHORT", confidence=0.63, tp_percent=0.006, sl_percent=0.003, leverage=clamp_leverage(10, cfg), reason=f"Bearish engulfing at resistance {resistance:.2f}")
+            return Signal(side="SHORT", confidence=0.63, tp_percent=0.006, sl_percent=0.003, leverage=clamp_leverage(10, CONFIG), reason=f"Bearish engulfing at resistance {resistance:.2f}")
         return None
 
 class OBVDivergenceStrategy(BaseStrategy):
@@ -622,6 +659,20 @@ class OBVDivergenceStrategy(BaseStrategy):
 ALL_STRATEGIES = [
     EMAScalpStrategy(), RSISnapStrategy(), BBSqueezeStrategy(), MACDFlipStrategy(), VWAPBounceStrategy(), StochCrossStrategy(), ATRBreakoutStrategy(), TripleEMAStrategy(), EngulfingSRStrategy(), OBVDivergenceStrategy()
 ]
+
+
+
+def load_2h_strategies():
+    try:
+        from new_strategies_2h import NEW_2H_STRATEGIES, NEW_CATEGORIES
+    except Exception as e:
+        logger.warning(f"Failed to load 2h strategies: {e}")
+        return
+    existing = {s.id for s in ALL_STRATEGIES}
+    for s in NEW_2H_STRATEGIES:
+        if s.id not in existing:
+            ALL_STRATEGIES.append(s)
+    CONFIG["strategy_categories"].update(NEW_CATEGORIES)
 
 class CorrelationFilter:
     def __init__(self):
@@ -709,6 +760,8 @@ def run_signal_scan(market_data: dict[str, list[Candle]], active_trades: list[Ac
         open_interest = {}
     if spread_map is None:
         spread_map = {}
+    if funding is None:
+        funding = {}
 
     drawdown_check = correlation_filter.check_drawdown_breaker(balance); result.drawdown = drawdown_check
     if drawdown_check.paused:
@@ -716,12 +769,16 @@ def run_signal_scan(market_data: dict[str, list[Candle]], active_trades: list[Ac
     btc_macro = CorrelationFilter.detect_btc_macro_move(market_data); result.btc_macro = btc_macro
     open_pairs = {t.pair for t in active_trades}
     slots_available = cfg["max_concurrent_trades"] - len(active_trades)
+    max_1m = cfg.get("max_1m_trades", cfg["max_concurrent_trades"])
+    max_2h = cfg.get("max_2h_trades", cfg["max_concurrent_trades"])
+    active_1m = sum(1 for t in active_trades if not is_2h_strategy(t.strategy_id))
+    active_2h = sum(1 for t in active_trades if is_2h_strategy(t.strategy_id))
     if slots_available <= 0:
         result.diagnostics = ScanDiagnostics(raw_count=0, final=0, reason="ALL_SLOTS_FULL"); return result
     raw_signals: list[TradeSignal] = []
-    conf_th = cfg.get("confidence_threshold", 0.55)
-    confirm = cfg.get("confirm_signal", False)
-    min_vol = cfg.get("min_volatility_pct", 0.0)
+    base_conf_th = cfg.get("confidence_threshold", 0.55)
+    base_confirm = cfg.get("confirm_signal", False)
+    base_min_vol = cfg.get("min_volatility_pct", 0.0)
     ema_fast_n = cfg.get("trend_ema_fast", 0)
     ema_slow_n = cfg.get("trend_ema_slow", 0)
     regime_min_trend = cfg.get("regime_min_trend_pct", 0.0)
@@ -735,13 +792,6 @@ def run_signal_scan(market_data: dict[str, list[Candle]], active_trades: list[Ac
         if pair in open_pairs: continue
         if btc_macro.is_macro_move and pair != "BTCUSDT": continue
         price = candles[-1].close
-        # Volatility filter
-        if min_vol and len(candles) >= 20:
-            hi = max(c.high for c in candles[-20:])
-            lo = min(c.low for c in candles[-20:])
-            vol_pct = (hi - lo) / price if price else 0
-            if vol_pct < min_vol:
-                continue
         # Trend filter (EMA)
         closes = [c.close for c in candles]
         ap = get_adaptive_params(pair, candles) if cfg.get("adaptive_params", {}).get("enabled", False) else None
@@ -754,26 +804,47 @@ def run_signal_scan(market_data: dict[str, list[Candle]], active_trades: list[Ac
         if ema_fast is not None and ema_slow is not None and price:
             trend_strength = abs(ema_fast - ema_slow) / price
         for strategy in strategies:
+            is2h = is_2h_strategy(strategy.id)
+            if is2h and active_2h >= max_2h: continue
+            if (not is2h) and active_1m >= max_1m: continue
+            s_cfg = CONFIG_2H if is2h else {}
+            conf_th = s_cfg.get("confidence_threshold", base_conf_th)
+            confirm = s_cfg.get("confirm_signal", base_confirm)
+            min_vol = s_cfg.get("min_volatility_pct", base_min_vol)
+            max_funding_long = s_cfg.get("max_funding_long", cfg.get("max_funding_long", 0.0))
+            max_funding_short = s_cfg.get("max_funding_short", cfg.get("max_funding_short", 0.0))
+            skip_trend = s_cfg.get("skip_trend_ema_filter", False)
+            skip_regime = s_cfg.get("skip_regime_filter", False)
+            # volatility filter (tier-specific)
+            if min_vol and len(candles) >= 20:
+                hi = max(c.high for c in candles[-20:])
+                lo = min(c.low for c in candles[-20:])
+                vol_pct = (hi - lo) / price if price else 0
+                if vol_pct < min_vol:
+                    continue
             if btc_macro.is_macro_move and pair == "BTCUSDT":
                 cat = CorrelationFilter.get_strategy_category(strategy.id)
                 if cat != "reversion": continue
-            eval_result = strategy.evaluate(candles)
+            if hasattr(strategy, "needs_funding") and strategy.needs_funding:
+                eval_result = strategy.evaluate(candles, funding_rate=funding.get(pair, 0.0))
+            else:
+                eval_result = strategy.evaluate(candles)
             if eval_result is None: continue
             # pair-specific strategy allowlist
             pf = cfg.get("pair_filters", {})
             if pair in pf and strategy.id not in pf[pair]:
                 continue
             if eval_result.confidence < conf_th: continue
-            if confirm:
+            if confirm and not is2h:
                 prev_eval = strategy.evaluate(candles[:-1]) if len(candles) > 51 else None
                 if not prev_eval or prev_eval.side != eval_result.side or prev_eval.confidence < conf_th:
                     continue
             # Regime filter
-            if regime_min_trend and trend_strength < regime_min_trend:
-                if strategy.id in CONFIG["strategy_categories"]["trend"]:
+            if (not skip_regime) and regime_min_trend and trend_strength < regime_min_trend:
+                if strategy.id in CONFIG["strategy_categories"].get("trend", []):
                     continue
             # Trend alignment
-            if ema_fast is not None and ema_slow is not None:
+            if (not skip_trend) and ema_fast is not None and ema_slow is not None:
                 if eval_result.side == "LONG" and not (price > ema_fast and ema_fast > ema_slow):
                     continue
                 if eval_result.side == "SHORT" and not (price < ema_fast and ema_fast < ema_slow):
@@ -795,18 +866,20 @@ def run_signal_scan(market_data: dict[str, list[Candle]], active_trades: list[Ac
             else:
                 trade_size = base_size
             if trade_size < cfg["min_trade_size"] or balance < trade_size: continue
-            tp_mult = cfg.get("tp_multiplier", 1.0)
-            min_tp = cfg.get("min_tp_percent", 0.0)
+            tp_mult = s_cfg.get("tp_multiplier", cfg.get("tp_multiplier", 1.0))
+            min_tp = s_cfg.get("min_tp_percent", cfg.get("min_tp_percent", 0.0))
+            min_sl = s_cfg.get("min_sl_percent", cfg.get("min_sl_percent", 0.0))
             tp_pct = max(eval_result.tp_percent * tp_mult, min_tp)
             tp_price = price * (1 + tp_pct) if eval_result.side == "LONG" else price * (1 - tp_pct)
-            sl_price = price * (1 - eval_result.sl_percent) if eval_result.side == "LONG" else price * (1 + eval_result.sl_percent)
-            economics = calculate_trade_economics(price, tp_price, sl_price, eval_result.side, trade_size, clamp_leverage(eval_result.leverage, cfg))
+            sl_pct = max(eval_result.sl_percent, min_sl)
+            sl_price = price * (1 - sl_pct) if eval_result.side == "LONG" else price * (1 + sl_pct)
+            economics = calculate_trade_economics(price, tp_price, sl_price, eval_result.side, trade_size, clamp_leverage(eval_result.leverage, CONFIG))
             if not economics.is_profitable: continue
             # min risk-reward guard
-            min_rr = cfg.get("min_risk_reward", None)
-            if min_rr is not None and economics.rr_ratio < min_rr:
+            min_rr = s_cfg.get("min_risk_reward", cfg.get("min_risk_reward", None))
+            if min_rr is not None and economics.risk_reward < min_rr:
                 continue
-            raw_signals.append(TradeSignal(pair=pair, strategy_id=strategy.id, strategy_name=strategy.name, strategy_category=CorrelationFilter.get_strategy_category(strategy.id), side=eval_result.side, confidence=eval_result.confidence, entry_price=price, tp_price=tp_price, sl_price=sl_price, leverage=clamp_leverage(eval_result.leverage, cfg), trade_size=trade_size, reason=eval_result.reason, economics=economics))
+            raw_signals.append(TradeSignal(pair=pair, strategy_id=strategy.id, strategy_name=strategy.name, strategy_category=CorrelationFilter.get_strategy_category(strategy.id), side=eval_result.side, confidence=eval_result.confidence, entry_price=price, tp_price=tp_price, sl_price=sl_price, leverage=clamp_leverage(eval_result.leverage, CONFIG), trade_size=trade_size, reason=eval_result.reason, economics=economics))
     # apply market divergence boost (confidence only)
     div_cfg = cfg.get("divergence_boost", {})
     div_dir, div_count = (0,0)
@@ -844,7 +917,7 @@ def run_signal_scan(market_data: dict[str, list[Candle]], active_trades: list[Ac
         if sig.pair in seen_pairs: continue
         seen_pairs.add(sig.pair); deduped.append(sig)
     diag = ScanDiagnostics(raw_count=len(deduped))
-    after_cooldown = correlation_filter.apply_cooldown_filter(deduped); diag.after_cooldown = len(after_cooldown)
+    after_cooldown = apply_cooldown_tiered(deduped); diag.after_cooldown = len(after_cooldown)
     after_flood = correlation_filter.apply_same_side_flood_filter(after_cooldown); diag.after_flood = len(after_flood)
     after_category = correlation_filter.apply_category_filter(after_flood, active_trades); diag.after_category = len(after_category)
     final_signals = after_category[:slots_available]; diag.final = len(final_signals)
@@ -852,6 +925,19 @@ def run_signal_scan(market_data: dict[str, list[Candle]], active_trades: list[Ac
     all_filtered = [s for s in deduped + after_cooldown + after_flood + after_category if s._filtered]
     result.signals = final_signals; result.filtered = all_filtered; result.diagnostics = diag
     return result
+
+
+
+def apply_cooldown_tiered(signals: list[TradeSignal]) -> list[TradeSignal]:
+    now = time.time()
+    passed = []
+    for sig in signals:
+        cooldown = CONFIG_2H.get("cooldown_sec", CONFIG["correlation"]["cooldown_sec"]) if is_2h_strategy(sig.strategy_id) else CONFIG["correlation"]["cooldown_sec"]
+        last = correlation_filter.pair_cooldowns.get(sig.pair)
+        if last and now - last < cooldown:
+            sig._filtered = True; sig._filter_reason = f"Cooldown: {sig.pair} {now - last:.0f}s/{cooldown}s"; continue
+        passed.append(sig)
+    return passed
 
 def get_correlation_state() -> dict:
     return correlation_filter.get_state()

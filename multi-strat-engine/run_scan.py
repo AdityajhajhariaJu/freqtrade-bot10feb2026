@@ -14,8 +14,9 @@ import asyncio
 import ccxt.async_support as ccxt
 import time
 import traceback
-from strategies import Candle, ActiveTrade, run_signal_scan, CONFIG
+from strategies import Candle, ActiveTrade, run_signal_scan, CONFIG, load_2h_strategies
 
+load_2h_strategies()
 PAIRS = CONFIG["pairs"]
 TF = "1m"
 LIMIT = 200
